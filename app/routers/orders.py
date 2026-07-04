@@ -24,7 +24,7 @@ def create_order(
     customer: User = Depends(require_customer),
 ):
     order = order_service.create_order(db, customer.id, payload)
-    return order_service.to_customer_order_out(order, db)
+    return order_service.to_customer_order_out(order)
 
 
 @customer_router.post("/{order_id}/pay", response_model=OrderActionOut)
@@ -74,7 +74,7 @@ def list_my_orders(
 ):
     orders, total = order_service.list_customer_orders(db, customer.id, limit, offset)
     return CustomerOrderListOut(
-        items=[order_service.to_customer_order_out(o, db) for o in orders], total=total
+        items=[order_service.to_customer_order_out(o) for o in orders], total=total
     )
 
 
@@ -89,5 +89,5 @@ def list_all_orders(
 ):
     orders, total = order_service.list_admin_orders(db, limit, offset, status_)
     return AdminOrderListOut(
-        items=[order_service.to_admin_order_out(o, db) for o in orders], total=total
+        items=[order_service.to_admin_order_out(o) for o in orders], total=total
     )

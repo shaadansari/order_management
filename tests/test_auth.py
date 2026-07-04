@@ -25,7 +25,7 @@ def test_register_rejects_invalid_email(client):
 
 def test_login_valid_returns_token(client):
     register(client, "ok@example.com")
-    r = client.post("/v1/auth/login", json={"email": "ok@example.com", "password": "secret123"})
+    r = client.post("/v1/auth/login", data={"username": "ok@example.com", "password": "secret123"})
     assert r.status_code == 200
     body = r.json()
     assert body["token_type"] == "bearer"
@@ -36,7 +36,7 @@ def test_login_valid_returns_token(client):
 def test_login_wrong_password_returns_401_generic_message(client):
     register(client, "ok2@example.com")
     r = client.post(
-        "/v1/auth/login", json={"email": "ok2@example.com", "password": "WRONG"}
+        "/v1/auth/login", data={"username": "ok2@example.com", "password": "WRONG"}
     )
     assert r.status_code == 401
     body = r.json()
@@ -47,7 +47,7 @@ def test_login_wrong_password_returns_401_generic_message(client):
 
 def test_login_unknown_user_returns_same_401(client):
     # Same shape/message as wrong-password — no account enumeration.
-    r = client.post("/v1/auth/login", json={"email": "ghost@example.com", "password": "whatever"})
+    r = client.post("/v1/auth/login", data={"username": "ghost@example.com", "password": "whatever"})
     assert r.status_code == 401
     assert r.json()["message"] == "Invalid credentials"
 

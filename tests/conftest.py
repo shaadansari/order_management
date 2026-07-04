@@ -57,7 +57,9 @@ def register(client, email, password="secret123", role="customer"):
 
 
 def login_token(client, email, password="secret123"):
-    r = client.post("/v1/auth/login", json={"email": email, "password": password})
+    # The /v1/auth/login route uses OAuth2PasswordRequestForm (form fields username/password,
+    # where username is the email) so the /docs "Authorize" button works — send form data.
+    r = client.post("/v1/auth/login", data={"username": email, "password": password})
     assert r.status_code == 200, r.text
     return r.json()["access_token"]
 
