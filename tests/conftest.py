@@ -12,6 +12,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.limiter import limiter
 from app.database import Base, get_db
 from app.main import app
 
@@ -85,6 +86,16 @@ def fake_cache(monkeypatch):
     fake = FakeRedisCache()
     monkeypatch.setattr("app.services.product_service.cache", fake)
     return fake
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    # slowapi keeps counters in memory; clear them between tests so one test's auth bursts
+    # (and the dedicated rate-limit tests) don't push the next test over /auth/login (5/min)
+    # or /auth/register (3/min).
+    limiter.reset()
+    yield
+    limiter.reset()
 
 
 # ---- helpers / shared users ----

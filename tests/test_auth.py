@@ -74,3 +74,47 @@ def test_consistent_error_shape(client):
     body = r.json()
     assert set(["error", "message", "status"]).issubset(body.keys())
     assert body["status"] == r.status_code
+
+
+# --------------------------------------------------------------------------- #
+# Rate limiting (slowapi) on /auth/login and /auth/register
+# --------------------------------------------------------------------------- #
+def test_login_rate_limit_returns_429_after_5(client):
+    # 5 logins/min/IP. The first 5 run the endpoint (401 — unregistered, but slowapi still
+    # counts them); the 6th within the same minute is refused before the endpoint runs.
+    for _ in range(5):
+        r = client.post(
+            "/v1/auth/login", data={"username": "nope@example.com", "password": "secret123"}
+        )
+        assert r.status_code == 401
+    sixth = client.post(
+        "/v1/auth/login", data={"username": "nope@example.com", "password": "secret123"}
+    )
+    assert sixth.status_code == 429
+
+
+def test_rate_limit_error_follows_standard_shape(client):
+    # Burn through the login budget, then assert the 429 body matches the contract.
+    for _ in range(5):
+        client.post(
+            "/v1/auth/login", data={"username": "nope@example.com", "password": "secret123"}
+        )
+    body = client.post(
+        "/v1/auth/login", data={"username": "nope@example.com", "password": "secret123"}
+    ).json()
+    assert set(["error", "message", "status"]).issubset(body.keys())
+    assert body["error"] == "RATE_LIMIT_EXCEEDED"
+    assert body["message"] == "Too many requests"
+    assert body["status"] == 429
+
+
+def test_rate_limited_login_returns_rate_limit_headers(client):
+    # slowapi injects X-RateLimit-* on a normal (non-raising) response, so use a successful
+    # login rather than a 401.
+    register(client, "ok@example.com")
+    r = client.post(
+        "/v1/auth/login", data={"username": "ok@example.com", "password": "secret123"}
+    )
+    assert r.status_code == 200
+    assert r.headers["x-ratelimit-limit"] == "5"
+    assert "x-ratelimit-remaining" in r.headers

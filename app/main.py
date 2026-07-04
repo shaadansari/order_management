@@ -5,10 +5,13 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import settings
 from .core.errors import APIError, api_error_handler
+from .core.limiter import limiter
 from .database import Base, engine
 from .routers import auth, orders, products
 
@@ -22,6 +25,12 @@ logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="Order Management System", version="1.0.0")
 
 api_prefix = f"/{settings.api_version}"  # /v1 — versioning from day one
+
+# Rate limiting (slowapi). WHY the limiter instance lives in app.core.limiter: the auth
+# router imports it to decorate login/register, so defining it in main would be a circular
+# import (main imports the routers). The middleware reads the limiter off app.state.
+app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
 
 
 # --------------------------------------------------------------------------- #
@@ -63,6 +72,16 @@ async def _handle_validation(_: Request, exc: RequestValidationError):
             "status": 422,
             "details": jsonable_encoder(exc.errors()),
         },
+    )
+
+
+@app.exception_handler(RateLimitExceeded)
+async def _handle_rate_limit(_: Request, _exc: RateLimitExceeded):
+    # Map slowapi's RateLimitExceeded into the standard error shape so even 429s share the
+    # one contract clients expect.
+    return JSONResponse(
+        status_code=429,
+        content={"error": "RATE_LIMIT_EXCEEDED", "message": "Too many requests", "status": 429},
     )
 
 

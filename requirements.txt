@@ -20,6 +20,9 @@ python-multipart           # form parsing for OAuth2 password flow in /docs
 # --- Caching ---
 redis==5.0.1              # in-memory cache in front of GET /v1/products
 
+# --- Rate limiting ---
+slowapi==0.1.9            # per-IP rate limits on auth endpoints (brute-force protection)
+
 # --- Tests ---
 pytest
 httpx                      # FastAPI TestClient transport
