@@ -1,0 +1,22 @@
+# --- Web framework ---
+fastapi
+uvicorn[standard]
+
+# --- DB / ORM ---
+sqlalchemy>=2.0
+
+# --- Validation / settings ---
+pydantic>=2
+pydantic-settings
+email-validator            # required by Pydantic's EmailStr
+
+# --- Auth ---
+PyJWT
+bcrypt
+
+# --- Misc ---
+python-multipart           # form parsing for OAuth2 password flow in /docs
+
+# --- Tests ---
+pytest
+httpx                      # FastAPI TestClient transport

@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual envs
+venv/
+.venv/
+env/
+
+# Secrets — never commit
+.env
+
+# SQLite local database + WAL/journal sidecars
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Generated invoices (background-task output)
+invoices/
