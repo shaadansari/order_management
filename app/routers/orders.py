@@ -41,9 +41,11 @@ def pay_order(
     order = order_service.pay_order(db, customer.id, order_id, force_fail=force_fail)
 
     # WHY background tasks + only primitives passed: invoice/email are NOT part of the
-    # critical payment path, so we run them after the response returns (non-blocking).
-    # We pass order_id (not the ORM object) because the request's DB session closes once
-    # the response is sent; the worker re-opens its own session. See workers/invoice.py.
+    # critical payment path, so we run them after the response returns (non-blocking),
+    # and ONLY once pay_order has committed a PAID order (it raises before reaching PAID
+    # on any failure). We pass order_id (not the ORM object) because the request's DB
+    # session closes once the response is sent; the worker re-opens its own. See
+    # workers/invoice.py.
     if order.status == OrderStatus.PAID.value:
         background_tasks.add_task(generate_invoice, order.id)
         background_tasks.add_task(send_email_notification, customer.email, order.id)

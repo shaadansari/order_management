@@ -1,10 +1,13 @@
 """Order business logic: create, pay, cancel, listing, and response serializers.
 
-The single most important correctness decision in the whole system lives in
-`_reserve_stock_atomic`: an atomic conditional UPDATE to reserve stock, which
-prevents overselling under concurrency on BOTH SQLite and PostgreSQL. `create_order`
-is now a short orchestrator; the steps (merge, resolve, reserve, persist) live in
-the private `_*` helpers so each concern reads as one named unit.
+Stock model (production-correct): stock is NOT touched at order creation — an order is
+just a CREATED intent with a price snapshot. Stock is decremented atomically only on
+successful payment (`_reduce_stock_atomic` inside `pay_order`), which is where the
+oversell race actually lives. Cancelling a CREATED order therefore touches no stock
+(nothing was ever reserved).
+
+`create_order` / `pay_order` / `cancel_order` are short orchestrators; the steps live
+in the private `_*` helpers so each concern reads as one named unit.
 """
 from sqlalchemy import update
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -31,28 +34,6 @@ _ORDER_ITEM_PRODUCT = selectinload(Order.items).selectinload(OrderItem.product)
 _ADMIN_ORDER_OPTIONS = (_ORDER_ITEM_PRODUCT, joinedload(Order.user))
 
 
-def _load_order_for_response(
-    db: Session, order_id: int, *, include_user: bool = False
-) -> Order | None:
-    """Fetch one order with items + products (and optionally the customer) eager-loaded.
-
-    The response serializers can then map it with NO further DB queries. WHY
-    populate_existing(): create_order/cancel_order mutate stock via bulk UPDATEs that
-    bypass the identity map (synchronize_session=False), so a Product already cached
-    in the session would otherwise show STALE stock. populate_existing() forces every
-    row loaded by this query to overwrite the cached instance, so current_stock
-    reflects the committed value (e.g. 8 after ordering 2 of 10).
-    """
-    options = _ADMIN_ORDER_OPTIONS if include_user else (_ORDER_ITEM_PRODUCT,)
-    return (
-        db.query(Order)
-        .options(*options)
-        .populate_existing()
-        .filter(Order.id == order_id)
-        .one_or_none()
-    )
-
-
 # --------------------------------------------------------------------------- #
 # CREATE
 # --------------------------------------------------------------------------- #
@@ -65,10 +46,13 @@ def _merge_requested(items) -> dict[int, int]:
 
 
 def _resolve_products(db: Session, requested: dict[int, int]):
-    """Batch-read the requested products, validate availability, compute the total.
+    """Batch-read the requested products, validate they exist and are available.
 
     Returns (line_items, total). The total is computed SERVER-SIDE from live DB
     prices — a client-sent total is never trusted.
+
+    NOTE: stock is intentionally NOT validated here. Stock is only checked (and
+    decremented) at payment time; an order is a price-snapped intent, not a reservation.
     """
     products = db.query(Product).filter(Product.id.in_(requested.keys())).all()
     by_id = {p.id: p for p in products}
@@ -86,45 +70,12 @@ def _resolve_products(db: Session, requested: dict[int, int]):
     return line_items, total
 
 
-def _reserve_stock_atomic(db: Session, line_items: list[tuple[Product, int]]) -> None:
-    """Atomically reserve (decrement) stock for every line item.
-
-    WHY a conditional UPDATE per product instead of SELECT ... FOR UPDATE:
-      * SQLite ignores FOR UPDATE (it has no row locks), so relying on it gives false
-        safety during local dev.
-      * `UPDATE ... SET stock = stock - :qty WHERE id = :id AND stock >= :qty` is ONE
-        atomic statement. On SQLite writes are serialized (no two can interleave), and
-        on Postgres the statement is atomic and takes a row lock. `rowcount` tells us
-        whether it actually decremented. Race-free on both engines.
-    If ANY item can't be reserved, we roll back the WHOLE order — undoing earlier
-    successful decrements in this same transaction so no stock is lost to a half-built
-    order. This is THE guard against overselling when two customers race for the last
-    item.
-    """
-    for product, qty in line_items:
-        result = db.execute(
-            update(Product)
-            .where(Product.id == product.id)
-            .where(Product.stock >= qty)
-            .values(stock=Product.stock - qty)
-            .execution_options(synchronize_session=False)
-        )
-        if result.rowcount == 0:
-            db.rollback()
-            raise APIError(
-                400,
-                "INSUFFICIENT_STOCK",
-                f"Insufficient stock for product '{product.name}'",
-            )
-
-
 def _persist_order(db: Session, user_id: int, line_items: list[tuple[Product, int]], total) -> Order:
-    """Create the Order + OrderItem rows and commit the whole transaction atomically.
+    """Create the Order + OrderItem rows and commit.
 
     WHY flush() before adding items: it assigns order.id (needed for the
-    OrderItem.order_id FK) WITHOUT ending the transaction, so the stock decrements
-    from _reserve_stock_atomic and these rows all commit together. unit_price is a
-    SNAPSHOT of the product price at order time (see OrderItem docstring).
+    OrderItem.order_id FK) WITHOUT ending the transaction. unit_price is a SNAPSHOT of
+    the product price at order time (see OrderItem docstring). Stock is NOT modified.
     """
     order = Order(user_id=user_id, status=OrderStatus.CREATED.value, total_amount=total)
     db.add(order)
@@ -145,19 +96,19 @@ def _persist_order(db: Session, user_id: int, line_items: list[tuple[Product, in
 
 
 def create_order(db: Session, user_id: int, data: OrderCreate) -> Order:
-    """Reserve stock and create a CREATED order. Atomic — never oversells.
+    """Create a CREATED order (a price-snapped intent). Does NOT touch stock.
 
-    Per the assignment, stock is reduced at order creation (not at payment).
+    Per the production model, stock is reduced only on successful payment — never at
+    creation. See pay_order.
     """
     requested = _merge_requested(data.items)
     line_items, total = _resolve_products(db, requested)
-    _reserve_stock_atomic(db, line_items)
     order = _persist_order(db, user_id, line_items, total)
 
-    # The order's stock was just mutated by a bulk UPDATE that bypasses the identity
-    # map, so reload the order (with items + products eager-loaded) for a response
-    # that reflects the committed stock. See _load_order_for_response.
-    return _load_order_for_response(db, order.id)
+    # Reload with items + products eager-loaded for the response. No populate_existing()
+    # needed: create_order touches no stock, so nothing here is stale. current_stock is the
+    # FULL stock (nothing reserved yet); it drops only after payment.
+    return db.query(Order).options(_ORDER_ITEM_PRODUCT).filter(Order.id == order.id).first()
 
 
 # --------------------------------------------------------------------------- #
@@ -175,19 +126,69 @@ def _load_owned_order(db: Session, user_id: int, order_id: int) -> Order:
     return order
 
 
+def _reduce_stock_atomic(db: Session, items) -> None:
+    """Atomically decrement stock for every order item — THE oversell guard, at payment.
+
+    WHY a conditional UPDATE per item instead of SELECT ... FOR UPDATE:
+      * SQLite ignores FOR UPDATE (it has no row locks), so relying on it gives false
+        safety during local dev.
+      * `UPDATE ... SET stock = stock - :qty WHERE id = :id AND stock >= :qty` is ONE
+        atomic statement. On SQLite writes are serialized (no two interleave), and on
+        Postgres the statement is atomic and takes a row lock. `rowcount` tells us
+        whether it actually decremented. Race-free on both engines.
+    If ANY item can't be reduced, we roll back the WHOLE payment — undoing earlier
+    successful decrements in this same transaction so no stock is lost to a half-paid
+    order. This is what prevents two customers from buying the last item simultaneously.
+    """
+    for item in items:
+        result = db.execute(
+            update(Product)
+            .where(Product.id == item.product_id)
+            .where(Product.stock >= item.quantity)
+            .values(stock=Product.stock - item.quantity)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 0:
+            db.rollback()
+            product = db.get(Product, item.product_id)
+            name = product.name if product else f"id={item.product_id}"
+            raise APIError(
+                400,
+                "INSUFFICIENT_STOCK",
+                f"Insufficient stock for product '{name}'",
+            )
+
+
 def _simulate_payment_gateway(order: Order) -> bool:
-    """Placeholder for a real payment provider (Stripe, etc.). Always succeeds here."""
+    """Placeholder for a real payment provider (Stripe, etc.). Always succeeds here.
+
+    Swap this body for a real gateway call when wiring up payments and return its verdict.
+    The `force_fail` hook in pay_order covers the 402 decline path meanwhile.
+    """
     return True
 
 
 # --------------------------------------------------------------------------- #
 # PAY
 # --------------------------------------------------------------------------- #
-def pay_order(db: Session, user_id: int, order_id: int, force_fail: bool = False) -> Order:
-    """Mark a CREATED order as PAID.
+def pay_order(
+    db: Session,
+    user_id: int,
+    order_id: int,
+    force_fail: bool = False,
+) -> Order:
+    """Mark a CREATED order as PAID: reserve stock atomically, then charge.
 
-    `force_fail` is a testing/demo hook so the 402 payment-failure path can be
-    exercised end-to-end (see POST /v1/orders/{id}/pay?force_fail=true).
+    Order of operations (one transaction):
+      1. status checks
+      2. atomically reserve stock for every item (refuse with INSUFFICIENT_STOCK before
+         charging anything — never charge for inventory we can't fulfil)
+      3. charge via `_simulate_payment_gateway`; on decline (or `force_fail`), roll back
+         -> stock is released and the order stays CREATED (402 PAYMENT_FAILED)
+      4. set PAID and commit
+
+    `force_fail` is a testing/demo hook (POST /v1/orders/{id}/pay?force_fail=true) that
+    forces the 402 path. `_simulate_payment_gateway` is the stub to swap for a real provider.
     """
     order = _load_owned_order(db, user_id, order_id)
 
@@ -196,37 +197,34 @@ def pay_order(db: Session, user_id: int, order_id: int, force_fail: bool = False
     if order.status == OrderStatus.CANCELLED.value:
         raise APIError(400, "ORDER_NOT_PAYABLE", "Cannot pay a cancelled order")
 
-    # ---- Defensive stock re-check at payment time ----
-    # Stock was reserved at creation, but an admin could have lowered a product's stock
-    # below the ordered quantity in the meantime. In that case we refuse to charge
-    # rather than ship something we can't fulfil.
-    for item in order.items:
-        product = db.get(Product, item.product_id)
-        if product is None or product.stock < 0:
-            raise APIError(
-                400, "OUT_OF_STOCK_AT_PAYMENT", "A product in your order is out of stock"
-            )
+    # 1) Reserve stock atomically. Raises INSUFFICIENT_STOCK (and rolls back) on the
+    #    first item that can't be fulfilled, so we never charge for an unfulfillable order.
+    _reduce_stock_atomic(db, order.items)
 
-    # ---- Simulate payment (ROLLBACK on failure = don't set PAID) ----
+    # 2) Charge. On decline (or force_fail), roll back the reservation above so stock is
+    #    NOT reduced and the order remains CREATED.
     if force_fail or not _simulate_payment_gateway(order):
         db.rollback()
         raise APIError(402, "PAYMENT_FAILED", "Payment was declined by the payment provider")
 
+    # 3) Finalize, then reload with items + products eager-loaded (db.refresh would not
+    #    load the relations).
     order.status = OrderStatus.PAID.value
     db.commit()
-    db.refresh(order)
-    return order
+    return db.query(Order).options(_ORDER_ITEM_PRODUCT).filter(Order.id == order.id).first()
 
 
 # --------------------------------------------------------------------------- #
 # CANCEL
 # --------------------------------------------------------------------------- #
 def cancel_order(db: Session, user_id: int, order_id: int) -> Order:
-    """Cancel a CREATED order and RETURN its reserved stock.
+    """Cancel a CREATED order.
 
-    WHY restore stock here (the design doc omits this step): stock was reserved at
-    creation. If cancel doesn't give it back, every cancelled order permanently "loses"
-    that inventory — a real inventory leak. Restoring is the correct behaviour.
+    Stock is NOT restored here: because stock is only ever reduced on successful
+    payment, a CREATED order holds no inventory — there is nothing to give back.
+    Cancelling simply flips the status to CANCELLED. (Only CREATED orders are
+    cancellable; a PAID order has already reduced stock and would need a refund flow,
+    not a cancel.) The order and its items are kept for admin/marketing history.
     """
     order = _load_owned_order(db, user_id, order_id)
 
@@ -235,18 +233,9 @@ def cancel_order(db: Session, user_id: int, order_id: int) -> Order:
             400, "ORDER_NOT_CANCELLABLE", "Only pending (CREATED) orders can be cancelled"
         )
 
-    for item in order.items:
-        db.execute(
-            update(Product)
-            .where(Product.id == item.product_id)
-            .values(stock=Product.stock + item.quantity)
-            .execution_options(synchronize_session=False)
-        )
-
     order.status = OrderStatus.CANCELLED.value
     db.commit()
-    db.refresh(order)
-    return order
+    return db.query(Order).options(_ORDER_ITEM_PRODUCT).filter(Order.id == order.id).first()
 
 
 # --------------------------------------------------------------------------- #
@@ -278,9 +267,10 @@ def list_admin_orders(db: Session, limit: int, offset: int, status: str | None =
 # --------------------------------------------------------------------------- #
 # These map ORM rows to the response shapes in the design's "Response Shapes" section.
 # They are PURE mappers: callers must pass an order whose items + products have been
-# eager-loaded (see _load_order_for_response / the list queries), so `item.product`
-# and `current_stock` are available without any DB read here. `current_stock` is the
-# LIVE product stock, not the order snapshot.
+# eager-loaded (see create_order/pay_order/cancel_order + the list queries), so
+# `item.product` and `current_stock` are available without any DB read here.
+# `current_stock` is the LIVE product stock (full at creation, reduced after payment),
+# not the order snapshot.
 def _item_to_out(item: OrderItem) -> OrderItemOut:
     # product is eager-loaded by the caller; it can only be None if the product row was
     # hard-deleted out from under a historical order_item (we soft-delete, so normally set).
