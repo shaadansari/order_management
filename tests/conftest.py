@@ -5,6 +5,7 @@ connection so all sessions in the test share the same in-memory DB). The FastAPI
 `get_db` dependency is overridden to use this test session.
 """
 import fnmatch
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -96,6 +97,23 @@ def _reset_rate_limiter():
     limiter.reset()
     yield
     limiter.reset()
+
+
+@pytest.fixture(autouse=True)
+def celery_tasks(monkeypatch):
+    """Mock the 3 Celery tasks where orders.py imports them so tests never need a broker.
+
+    Returns a dict of the mocks keyed by task name, so individual tests can assert which tasks
+    were fired and with what args. Fresh Mocks per test (function scope) -> call counts reset.
+    """
+    tasks = {
+        "generate_invoice": Mock(),
+        "send_order_notification": Mock(),
+        "check_low_stock": Mock(),
+    }
+    for name, mock in tasks.items():
+        monkeypatch.setattr(f"app.routers.orders.{name}", mock)
+    return tasks
 
 
 # ---- helpers / shared users ----

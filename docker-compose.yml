@@ -21,3 +21,29 @@ services:
       JWT_SECRET_KEY: change-me-in-production-please
     depends_on:
       - redis
+
+  # Celery worker — runs invoice/notification/inventory tasks. Inside Docker the broker is the
+  # redis service (Docker DNS "redis"), NOT localhost.
+  celery-worker:
+    build: .
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: sqlite:///./order_management.db
+      JWT_SECRET_KEY: change-me-in-production-please
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+
+  # Flower — Celery monitoring UI at http://localhost:5555.
+  flower:
+    build: .
+    command: celery -A app.workers.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+      - celery-worker

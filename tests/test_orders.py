@@ -270,3 +270,57 @@ def test_admin_orders_filter_by_status(client, admin_token, customer_token):
     ).json()
     assert paid["total"] == 1
     assert created["total"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Background tasks (Celery) fired from pay/cancel — mocked via the autouse
+# `celery_tasks` fixture, which returns the mocks by task name.
+# --------------------------------------------------------------------------- #
+def test_pay_triggers_all_three_tasks(client, admin_token, customer_token, celery_tasks):
+    p = make_product(client, admin_token, name="Laptop", price=100.00, stock=10)
+    order = _order(client, customer_token, [{"product_id": p["id"], "quantity": 1}]).json()
+    client.post(f"/v1/orders/{order['order_id']}/pay", headers=auth_header(customer_token))
+
+    # Invoice + PAID notification fired once; low-stock check fired once per item (stock 10->9).
+    celery_tasks["generate_invoice"].delay.assert_called_once_with(order["order_id"])
+    celery_tasks["send_order_notification"].delay.assert_called_once_with(
+        "cust@example.com", order["order_id"], "PAID"
+    )
+    celery_tasks["check_low_stock"].delay.assert_called_once_with(p["id"], "Laptop", 9)
+
+
+def test_cancel_triggers_cancelled_notification_only(client, admin_token, customer_token, celery_tasks):
+    p = make_product(client, admin_token, name="Laptop", price=100.00, stock=10)
+    order = _order(client, customer_token, [{"product_id": p["id"], "quantity": 1}]).json()
+    client.post(f"/v1/orders/{order['order_id']}/cancel", headers=auth_header(customer_token))
+
+    celery_tasks["send_order_notification"].delay.assert_called_once_with(
+        "cust@example.com", order["order_id"], "CANCELLED"
+    )
+    # No invoice or inventory work on cancel.
+    celery_tasks["generate_invoice"].delay.assert_not_called()
+    celery_tasks["check_low_stock"].delay.assert_not_called()
+
+
+def test_payment_failure_triggers_no_tasks(client, admin_token, customer_token, celery_tasks):
+    p = make_product(client, admin_token, name="Laptop", price=100.00, stock=10)
+    order = _order(client, customer_token, [{"product_id": p["id"], "quantity": 1}]).json()
+    r = client.post(
+        f"/v1/orders/{order['order_id']}/pay",
+        headers=auth_header(customer_token),
+        params={"force_fail": "true"},
+    )
+    assert r.status_code == 402  # pay_order raised before firing any task
+    for mock in celery_tasks.values():
+        mock.delay.assert_not_called()
+
+
+def test_low_stock_check_fired_with_low_stock_after_payment(client, admin_token, customer_token, celery_tasks):
+    # Stock 5, order 1 -> post-payment stock 4 (<= LOW_STOCK_THRESHOLD of 5).
+    p = make_product(client, admin_token, name="Rare", price=100.00, stock=5)
+    order = _order(client, customer_token, [{"product_id": p["id"], "quantity": 1}]).json()
+    client.post(f"/v1/orders/{order['order_id']}/pay", headers=auth_header(customer_token))
+
+    called_args = celery_tasks["check_low_stock"].delay.call_args
+    assert called_args is not None
+    assert called_args.args == (p["id"], "Rare", 4)  # at/below threshold -> alert path in-task

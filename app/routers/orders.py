@@ -1,4 +1,4 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from ..database import get_db
@@ -11,7 +11,9 @@ from ..schemas.order import (
     OrderCreate,
 )
 from ..services import order_service
-from ..workers.invoice import generate_invoice, send_email_notification
+from ..workers.inventory_worker import check_low_stock
+from ..workers.invoice_worker import generate_invoice
+from ..workers.notification_worker import send_order_notification
 
 customer_router = APIRouter(prefix="/orders", tags=["orders"])
 admin_orders_router = APIRouter(prefix="/admin/orders", tags=["orders"])
@@ -30,7 +32,6 @@ def create_order(
 @customer_router.post("/{order_id}/pay", response_model=OrderActionOut)
 def pay_order(
     order_id: int,
-    background_tasks: BackgroundTasks,
     force_fail: bool = Query(
         default=False,
         description="Testing hook: simulate a declined payment (-> 402)",
@@ -40,15 +41,22 @@ def pay_order(
 ):
     order = order_service.pay_order(db, customer.id, order_id, force_fail=force_fail)
 
-    # WHY background tasks + only primitives passed: invoice/email are NOT part of the
-    # critical payment path, so we run them after the response returns (non-blocking),
-    # and ONLY once pay_order has committed a PAID order (it raises before reaching PAID
-    # on any failure). We pass order_id (not the ORM object) because the request's DB
-    # session closes once the response is sent; the worker re-opens its own. See
-    # workers/invoice.py.
+    # WHY Celery .delay() + only primitives passed: invoice/notification/inventory work is NOT
+    # part of the critical payment path, so we enqueue it and return immediately. We pass only
+    # ids/strings (not ORM objects) because the request's DB session closes once the response is
+    # sent and the worker runs in a separate process with its own session. The 3 tasks are
+    # independent and each retries on its own. order.items + item.product are eager-loaded by
+    # pay_order's reload, so reading them here adds no extra queries. Nothing fires on a 402 —
+    # pay_order raises before returning PAID.
     if order.status == OrderStatus.PAID.value:
-        background_tasks.add_task(generate_invoice, order.id)
-        background_tasks.add_task(send_email_notification, customer.email, order.id)
+        generate_invoice.delay(order.id)
+        send_order_notification.delay(customer.email, order.id, "PAID")
+        for item in order.items:
+            check_low_stock.delay(
+                item.product_id,
+                item.product.name if item.product else f"id={item.product_id}",
+                item.product.stock if item.product else 0,
+            )
 
     return OrderActionOut(
         order_id=order.id, status=order.status, total_amount=float(order.total_amount)
@@ -62,6 +70,8 @@ def cancel_order(
     customer: User = Depends(require_customer),
 ):
     order = order_service.cancel_order(db, customer.id, order_id)
+    # Notify the customer their order was cancelled (no invoice/stock work on cancel).
+    send_order_notification.delay(customer.email, order.id, "CANCELLED")
     return OrderActionOut(
         order_id=order.id, status=order.status, total_amount=float(order.total_amount)
     )

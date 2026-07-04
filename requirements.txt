@@ -23,6 +23,10 @@ redis==5.0.1              # in-memory cache in front of GET /v1/products
 # --- Rate limiting ---
 slowapi==0.1.9            # per-IP rate limits on auth endpoints (brute-force protection)
 
+# --- Background jobs (Celery) ---
+celery==5.3.6             # durable, retrying task queue (broker/backend = Redis)
+flower==2.0.1             # Celery monitoring UI
+
 # --- Tests ---
 pytest
 httpx                      # FastAPI TestClient transport
