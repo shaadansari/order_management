@@ -4,6 +4,8 @@ Each test gets an isolated in-memory SQLite database (StaticPool keeps a single
 connection so all sessions in the test share the same in-memory DB). The FastAPI
 `get_db` dependency is overridden to use this test session.
 """
+import fnmatch
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -46,6 +48,43 @@ def client(db_session):
     with TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
+
+
+class FakeRedisCache:
+    """In-memory stand-in for RedisCache so tests never need a real Redis.
+
+    Mirrors app.core.cache.RedisCache (get/set/delete/delete_pattern). delete_pattern uses
+    glob matching (fnmatch), matching Redis SCAN patterns. ttl is accepted but ignored.
+    """
+
+    def __init__(self):
+        self.store: dict[str, str] = {}
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def set(self, key, value, ttl):
+        self.store[key] = value
+
+    def delete(self, key):
+        self.store.pop(key, None)
+
+    def delete_pattern(self, pattern):
+        for k in list(self.store):
+            if fnmatch.fnmatch(k, pattern):
+                del self.store[k]
+
+
+@pytest.fixture(autouse=True)
+def fake_cache(monkeypatch):
+    """Swap the Redis cache singleton for an in-memory fake for every test.
+
+    WHY autouse: guarantees no test talks to a real Redis (hermetic) and gives each test a
+    fresh cache. Tests that need to inspect cache state request `fake_cache` by name.
+    """
+    fake = FakeRedisCache()
+    monkeypatch.setattr("app.services.product_service.cache", fake)
+    return fake
 
 
 # ---- helpers / shared users ----

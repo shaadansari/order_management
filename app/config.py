@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expiry_minutes: int = 60
 
+    # Redis (optional — the app degrades gracefully to the DB if Redis is unreachable)
+    redis_url: str = "redis://localhost:6379/0"
+
     # App
     app_env: str = "development"
     api_version: str = "v1"

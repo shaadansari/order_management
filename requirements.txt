@@ -17,6 +17,9 @@ bcrypt
 # --- Misc ---
 python-multipart           # form parsing for OAuth2 password flow in /docs
 
+# --- Caching ---
+redis==5.0.1              # in-memory cache in front of GET /v1/products
+
 # --- Tests ---
 pytest
 httpx                      # FastAPI TestClient transport

@@ -46,6 +46,16 @@ def test_search_products(client, admin_token):
     assert names == ["Gaming Laptop"]
 
 
+def test_product_list_cache_invalidated_on_create(client, admin_token, fake_cache):
+    # Prime the cache with a public list call (default search=None, limit=20, offset=0).
+    client.get("/v1/products")
+    assert "products:list:None:20:0" in fake_cache.store
+
+    # Creating a product must invalidate the whole products:list:* family.
+    make_product(client, admin_token, name="Cached?")
+    assert "products:list:None:20:0" not in fake_cache.store
+
+
 def test_update_product_as_owner_admin(client, admin_token):
     product = make_product(client, admin_token, name="Laptop", price=100, stock=3)
     r = client.put(

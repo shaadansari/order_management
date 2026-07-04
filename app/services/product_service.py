@@ -1,9 +1,20 @@
+import json
+import logging
+
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from ..core.cache import cache
 from ..core.errors import ForbiddenError, NotFoundError
 from ..models import Product
-from ..schemas.product import ProductCreate, ProductUpdate
+from ..schemas.product import ProductCreate, ProductOut, ProductUpdate
+
+logger = logging.getLogger(__name__)
+
+# WHY 5 min: product data is read-heavy and changes rarely, so a short TTL takes most of the
+# read load off the DB. Writes (create/update/delete) invalidate immediately, so the only
+# staleness window is the gap between a write and its synchronous invalidation.
+PRODUCT_LIST_TTL = 300
 
 
 def create_product(db: Session, admin_id: int, data: ProductCreate) -> Product:
@@ -18,19 +29,42 @@ def create_product(db: Session, admin_id: int, data: ProductCreate) -> Product:
     db.add(product)
     db.commit()
     db.refresh(product)
+    cache.delete_pattern("products:list:*")  # new product can appear in any list variant
     return product
 
 
 def list_public_products(db: Session, search: str | None, limit: int, offset: int):
-    """Products visible to customers: only available ones, optional name/desc search."""
-    # WHY is_available=True filter here: customers must never see soft-deleted products.
+    """Products visible to customers: only available ones, optional name/desc search.
+
+    Results are cached in Redis (PRODUCT_LIST_TTL) keyed by the query params; any product write
+    invalidates the whole family (see create/update/soft_delete). Returns serialized dicts so
+    cache hits and misses share one shape — the router funnels them through ProductListOut.
+    """
+    # WHY this key shape: one entry per distinct (search, limit, offset) variant so different
+    # pages/searches don't collide. search may be None; str(None) is stable and deterministic.
+    key = f"products:list:{search}:{limit}:{offset}"
+
+    cached = cache.get(key)
+    if cached is not None:
+        logger.info("products list cache HIT key=%s", key)
+        payload = json.loads(cached)
+        return payload["items"], payload["total"]
+    logger.info("products list cache MISS key=%s -> DB", key)
+
+    # Cache miss -> query DB. WHY is_available=True here: customers must never see soft-deleted
+    # products.
     q = db.query(Product).filter(Product.is_available.is_(True))
     if search:
         pattern = f"%{search}%"
         q = q.filter(or_(Product.name.ilike(pattern), Product.description.ilike(pattern)))
     total = q.count()
     items = q.order_by(Product.id.desc()).offset(offset).limit(limit).all()
-    return items, total
+
+    # Serialize via the response schema so the cached payload is JSON-safe (ProductOut.price is
+    # float -> clean JSON) and round-trips back into ProductListOut on a hit.
+    serialized = [ProductOut.model_validate(p).model_dump(mode="json") for p in items]
+    cache.set(key, json.dumps({"items": serialized, "total": total}), PRODUCT_LIST_TTL)
+    return serialized, total
 
 
 def get_public_product(db: Session, product_id: int) -> Product:
@@ -64,6 +98,7 @@ def update_product(db: Session, product_id: int, admin_id: int, data: ProductUpd
         setattr(product, field, value)
     db.commit()
     db.refresh(product)
+    cache.delete_pattern("products:list:*")  # name/price/availability change can affect lists
     return product
 
 
@@ -73,6 +108,7 @@ def soft_delete_product(db: Session, product_id: int, admin_id: int) -> Product:
     product.is_available = False
     db.commit()
     db.refresh(product)
+    cache.delete_pattern("products:list:*")  # removed from public lists
     return product
 
 
