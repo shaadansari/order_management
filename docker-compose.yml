@@ -1,47 +1,50 @@
-# Run the app + Redis together: `docker compose up`.
-# Redis caches GET /v1/products; if Redis is down the app degrades to the DB (see
-# app/core/cache.py).
 services:
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-    # A cache needs no durability — Redis defaults to in-memory (no AOF/RDB), which is exactly
-    # what we want here: losing cached product lists on restart is harmless.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   app:
     build: .
     ports:
       - "8000:8000"
+    env_file: .env
     environment:
-      # Docker DNS resolves the hostname "redis" to the redis service above.
-      REDIS_URL: redis://localhost:6379/0
-      # Dev defaults — override JWT_SECRET_KEY (and point DATABASE_URL at Postgres) for real use.
+      # Compose `environment:` overrides `env_file:` — inside Docker the broker is the redis
+      # service (Docker DNS "redis"), not localhost.
+      REDIS_URL: redis://redis:6379/0
       DATABASE_URL: sqlite:///./order_management.db
-      JWT_SECRET_KEY: change-me-in-production-please
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  # Celery worker — runs invoice/notification/inventory tasks. Inside Docker the broker is the
-  # redis service (Docker DNS "redis"), NOT localhost.
   celery-worker:
     build: .
     command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
+    env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: sqlite:///./order_management.db
-      JWT_SECRET_KEY: change-me-in-production-please
     depends_on:
-      - redis
-    volumes:
-      - .:/app
+      redis:
+        condition: service_healthy
 
-  # Flower — Celery monitoring UI at http://localhost:5555.
   flower:
     build: .
     command: celery -A app.workers.celery_app flower --port=5555
     ports:
       - "5555:5555"
+    env_file: .env
     environment:
       REDIS_URL: redis://redis:6379/0
     depends_on:

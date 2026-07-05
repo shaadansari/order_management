@@ -7,7 +7,6 @@ from typing import Any
 
 import bcrypt
 import jwt
-from jwt import InvalidTokenError
 
 from ..config import settings
 

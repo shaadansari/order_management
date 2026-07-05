@@ -1,0 +1,52 @@
+services:
+  - type: web
+    name: order-management-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        value: sqlite:///./order_management.db
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_EXPIRY_MINUTES
+        value: 60
+      - key: APP_ENV
+        value: production
+      - key: API_VERSION
+        value: v1
+      - key: REDIS_URL
+        fromService:
+          name: order-management-redis
+          type: redis
+          property: connectionString
+
+  - type: worker
+    name: order-management-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: celery -A app.workers.celery_app worker --loglevel=info --concurrency=1
+    envVars:
+      - key: DATABASE_URL
+        value: sqlite:///./order_management.db
+      - key: JWT_SECRET_KEY
+        fromService:
+          name: order-management-api
+          type: web
+          envVarKey: JWT_SECRET_KEY
+      - key: APP_ENV
+        value: production
+      - key: API_VERSION
+        value: v1
+      - key: REDIS_URL
+        fromService:
+          name: order-management-redis
+          type: redis
+          property: connectionString
+
+  - type: redis
+    name: order-management-redis
+    plan: free
+    maxmemoryPolicy: allkeys-lru

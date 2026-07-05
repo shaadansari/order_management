@@ -52,9 +52,9 @@ Tests use an isolated in-memory SQLite database per test, so they don't touch yo
 | PUT | `/v1/products/{id}` | admin | Update product |
 | DELETE | `/v1/products/{id}` | admin | Soft delete (`is_available=false`) |
 | GET | `/v1/admin/products` | admin | List own products |
-| POST | `/v1/orders` | customer | Create order (status `CREATED`, stock reserved) |
-| POST | `/v1/orders/{id}/pay` | customer | Pay order → `PAID` |
-| POST | `/v1/orders/{id}/cancel` | customer | Cancel order → `CANCELLED` (stock restored) |
+| POST | `/v1/orders` | customer | Create order (status `CREATED`) |
+| POST | `/v1/orders/{id}/pay` | customer | Pay order → `PAID` (stock reduced here) |
+| POST | `/v1/orders/{id}/cancel` | customer | Cancel order → `CANCELLED` |
 | GET | `/v1/orders` | customer | Own order history |
 | GET | `/v1/admin/orders` | admin | All orders (filter by `?status=`) |
 
@@ -70,18 +70,20 @@ to exercise the 402 path.
 These were reviewed against the design doc and adjusted for correctness. Each is also
 documented inline in the code.
 
-1. **Stock is reserved atomically at order *creation*, not just at payment.** The doc
-   places `SELECT FOR UPDATE` in the payment flow, but stock is decremented at creation —
-   that's where the oversell race actually lives. The atomic reservation is in
-   `order_service.create_order`.
+1. **Stock is reduced only on successful payment, not at order creation.** An order is
+   just a CREATED intent with a price snapshot; it reserves nothing. The decrement happens
+   in `pay_order` via an atomic conditional
+   `UPDATE product SET stock = stock - :qty WHERE id = :id AND stock >= :qty` checked via
+   `rowcount` — race-free inventory management on both SQLite and PostgreSQL. If any item
+   can't be fulfilled, the whole payment rolls back (no stock lost, no charge).
 2. **Atomic conditional `UPDATE` instead of `SELECT ... FOR UPDATE`.** SQLite ignores
-   `FOR UPDATE` (no row locks), so it gives false safety in dev. The pattern
-   `UPDATE product SET stock = stock - :qty WHERE id = :id AND stock >= :qty` (checked via
-   `rowcount`) is race-free on **both** SQLite and PostgreSQL.
+   `FOR UPDATE` (no row locks), so it gives false safety in dev. The pattern above (checked
+   via `rowcount`) is race-free on **both** SQLite and PostgreSQL.
 3. **`Numeric(10,2)` for money instead of `REAL`** (float) — avoids float drift like
    `0.1 + 0.2 != 0.3`. Maps to `DECIMAL` on Postgres unchanged.
-4. **Cancel restores stock.** The doc omits this; without it every cancelled order
-   permanently leaks inventory.
+4. **Cancel does not restore stock.** Because stock is only ever reduced on successful
+   payment, a CREATED order holds no inventory — there is nothing to give back. Cancelling
+   just flips the status to CANCELLED (the order + items are kept for history).
 5. **`create_all` for dev, Alembic for prod.** Tables auto-create on startup for zero
    setup. Switch to Alembic migrations for production (schema is identical).
 
@@ -107,6 +109,22 @@ Every error returns the same shape:
 - **Rate limiting:** throttle `/v1/auth/login` (e.g. 5/min) against brute force.
 - **Background jobs:** replace `BackgroundTasks` with Celery + Redis/broker for retries
   and durability; add an idempotency key on `POST /orders/{id}/pay` to dedupe payments.
+- **Real payment gateway:** use two-phase **authorize → reserve stock → capture**. The
+  simulated single-call flow holds the product row lock across the charge; with a real
+  (slow) gateway that risks lock contention and a charge that succeeds but fails to commit.
+  Two-phase authorizes funds first (reversible), reserves stock, then captures — so a
+  failure after authorization can be voided without losing funds.
 - **Abandoned orders:** scheduled job to flag/remove stale `CREATED` orders after 15 days.
 - **Observability:** Sentry (errors) + Prometheus (metrics); structured logging.
 - **CI/CD:** GitHub Actions; the included `Dockerfile` containerizes the app.
+
+
+
+models/      → what DB stores
+schemas/     → what API shows
+routers/     → HTTP in/out only
+services/    → business logic
+core/        → shared tools (errors, security)
+middleware/  → request gatekeepers (auth)
+workers/     → background jobs
+migrations/  → DB change history

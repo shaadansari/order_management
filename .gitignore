@@ -20,3 +20,6 @@ env/
 
 # Generated invoices (background-task output)
 invoices/
+
+coverage.xml
+.coverage

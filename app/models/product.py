@@ -2,7 +2,6 @@ from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
-    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,

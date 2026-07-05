@@ -1,16 +1,29 @@
-# WHY 3.12-slim (not 3.14): slim images are small and 3.12 is a stable, widely-available
-# base. The app code is compatible across 3.11/3.12/3.13/3.14.
-FROM python:3.12-slim
-
+FROM python:3.12-slim AS builder
 WORKDIR /app
-
-# Install deps first for better layer caching (code changes don't bust the pip layer).
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+FROM python:3.12-slim
+WORKDIR /app
+
+# Non-root user for security
+# WHY: running as root in a container is a security risk — if the container
+# is compromised, attacker gets root. Non-root limits the blast radius.
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 COPY . .
+
+RUN chown -R appuser:appgroup /app
+USER appuser
 
 EXPOSE 8000
 
-# In a container, run without --reload and bind to all interfaces.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Health check — Render and Docker use this to know if the app is alive
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+
+# WHY 2 workers: single worker can't use multiple CPUs. 2 workers handle
+# concurrent requests better without overwhelming a small server.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
