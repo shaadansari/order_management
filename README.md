@@ -6,6 +6,7 @@ view all orders).
 
 See [Features](#features) for what's included; the sections below cover running it.
 
+
 ---
 
 ## Features
@@ -147,3 +148,110 @@ core/        → shared tools (errors, security)
 middleware/  → request gatekeepers (auth)
 workers/     → background jobs
 migrations/  → DB change history
+
+
+---
+
+## Deploy URL
+
+
+**Live API:** https://order-management-api-v6p6.onrender.com  
+**Interactive docs:** https://order-management-api-v6p6.onrender.com/docs
+
+> Free tier note: service spins down after 15 minutes of inactivity.
+> First request may take 30–60 seconds to wake up.
+> Note: the Celery worker is not deployed on Render (requires a paid plan), so background tasks don't run in the deployed version.
+
+## Architecture
+
+### High Level Design
+
+```mermaid
+graph TD
+    Client["Client (Browser/Mobile)"]
+    RL["Rate Limiter (slowapi)"]
+    API["FastAPI App /v1"]
+    AUTH["Auth Router"]
+    PROD["Products Router"]
+    ORD["Orders Router"]
+    MW["JWT Middleware"]
+    REDIS["Redis\ncache · queue"]
+    DB["Database\nSQLite dev / PostgreSQL prod"]
+    CEL["Celery Worker\ninvoice · notify · stock alert"]
+
+    Client -->|HTTPS| RL
+    RL -->|429 if exceeded| Client
+    RL --> API
+    API --> AUTH
+    API --> PROD
+    API --> ORD
+    API --> MW
+    API -->|cache GET /products| REDIS
+    API -->|SQL queries| DB
+    API -->|task queue| REDIS
+    REDIS -->|broker| CEL
+```
+
+### Pay Order Flow (LLD)
+
+```mermaid
+flowchart TD
+    A["POST /v1/orders/{id}/pay"] --> B["Rate limiter check"]
+    B -->|429| FAIL1["Too many requests"]
+    B --> C["JWT middleware"]
+    C -->|401| FAIL2["Invalid token"]
+    C --> E["order_service.pay_order()"]
+    E --> F["Status check\nCREATED only"]
+    F -->|400| FAIL3["Already paid / cancelled"]
+    F --> G["_reduce_stock_atomic()\nUPDATE WHERE stock >= qty"]
+    G -->|rowcount=0| FAIL4["400 Insufficient stock\ndb.rollback()"]
+    G --> H["_simulate_payment_gateway()\nSIMULATED (force_fail hook)"]
+    H -->|declined| FAIL5["402 Payment failed\ndb.rollback() restores stock"]
+    H --> I["order.status = PAID\ndb.commit()"]
+    I --> K["200 response returned"]
+    K --> L["Celery tasks fire\nnon-blocking"]
+    L --> M["generate_invoice"]
+    L --> N["send_order_notification"]
+    L --> O["check_low_stock"]
+```
+
+### Database Schema
+
+```mermaid
+erDiagram
+    USER {
+        int id PK
+        varchar email
+        text password
+        varchar role
+        timestamp created_at
+    }
+    PRODUCT {
+        int id PK
+        int created_by FK
+        text name
+        numeric(10,2) price
+        boolean is_available
+        int stock
+        timestamp created_at
+    }
+    ORDER {
+        int id PK
+        int user_id FK
+        text status
+        numeric(10,2) total_amount
+        timestamp created_at
+    }
+    ORDER_ITEMS {
+        int id PK
+        int order_id FK
+        int product_id FK
+        int quantity
+        numeric(10,2) unit_price
+    }
+
+    USER ||--o{ ORDER : places}
+    USER ||--o{ PRODUCT : creates}
+    ORDER ||--o{ ORDER_ITEMS : contains}
+    PRODUCT ||--o{ ORDER_ITEMS : included_in}
+```
