@@ -4,7 +4,7 @@ WHY this file exists separately from models: the engine + Base are infrastructur
 every model imports, so they must live in a leaf module with no business-logic deps.
 """
 from sqlalchemy import create_engine, event
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from .config import settings
 

@@ -1,6 +1,5 @@
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-
 VALID_ROLES = ("customer", "admin")
 
 
