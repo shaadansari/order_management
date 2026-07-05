@@ -223,14 +223,14 @@ erDiagram
         int id PK
         varchar email
         text password
-        varchar role
+        text role
         timestamp created_at
     }
     PRODUCT {
         int id PK
         int created_by FK
         text name
-        numeric(10,2) price
+        real price
         boolean is_available
         int stock
         timestamp created_at
@@ -239,7 +239,7 @@ erDiagram
         int id PK
         int user_id FK
         text status
-        numeric(10,2) total_amount
+        real total_amount
         timestamp created_at
     }
     ORDER_ITEMS {
@@ -247,11 +247,12 @@ erDiagram
         int order_id FK
         int product_id FK
         int quantity
-        numeric(10,2) unit_price
+        real unit_price
     }
 
-    USER ||--o{ ORDER : places}
-    USER ||--o{ PRODUCT : creates}
-    ORDER ||--o{ ORDER_ITEMS : contains}
-    PRODUCT ||--o{ ORDER_ITEMS : included_in}
+    USER ||--o{ ORDER : places
+    USER ||--o{ PRODUCT : creates
+    ORDER ||--o{ ORDER_ITEMS : contains
+    PRODUCT ||--o{ ORDER_ITEMS : included_in
 ```
+
