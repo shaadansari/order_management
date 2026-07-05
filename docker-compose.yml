@@ -9,6 +9,22 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---- Optional: local PostgreSQL instead of SQLite ----
+  # Uncomment to run the API against Postgres locally. Then in the `app` service set
+  #   DATABASE_URL: postgresql://oms_user:oms_pass@postgres:5432/order_management
+  # and either set APP_ENV=production (so start.sh runs `alembic upgrade head`) or run
+  # the migration by hand. The `volumes:` block at the bottom must also be uncommented.
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_USER: oms_user
+  #     POSTGRES_PASSWORD: oms_pass
+  #     POSTGRES_DB: order_management
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+
   app:
     build: .
     ports:
@@ -50,3 +66,7 @@ services:
     depends_on:
       - redis
       - celery-worker
+
+# Uncomment together with the `postgres` service above to persist its data:
+# volumes:
+#   postgres_data:

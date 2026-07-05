@@ -1,0 +1,8 @@
+# WHY: force shell scripts to LF on every platform. CRLF line endings break the
+# `#!/bin/bash` shebang inside the Linux container (`/bin/bash^M: bad interpreter`),
+# so a Windows checkout that gets built into Docker would fail at startup. start.sh
+# in particular must stay LF.
+*.sh text eol=lf
+
+# Let git normalize all other text files on commit; checkout uses the platform default.
+* text=auto

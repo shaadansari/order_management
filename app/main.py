@@ -15,10 +15,17 @@ from .core.limiter import limiter
 from .database import Base, engine
 from .routers import auth, orders, products
 
-# WHY create_all (not Alembic) for dev: zero-setup — tables appear on first run so the
-# app is immediately usable. The schema is identical to what Alembic would generate; for
-# production you swap to Alembic migrations (documented in the README). Code unchanged.
-Base.metadata.create_all(bind=engine)
+logger = logging.getLogger(__name__)
+
+# WHY conditional create_all: development/test gets zero-config setup (tables appear on
+# first run). Production must NOT auto-create — that would bypass Alembic's versioning and
+# could mask an out-of-date schema; start.sh runs `alembic upgrade head` before the server
+# boots instead. create_all is idempotent, so running it in dev alongside an Alembic-
+# migrated DB is harmless (tables already exist -> no-op).
+if settings.app_env in ("development", "test"):
+    Base.metadata.create_all(bind=engine)
+else:
+    logger.info("Production mode: skipping create_all — Alembic handles migrations")
 
 logging.basicConfig(level=logging.INFO)
 

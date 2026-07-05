@@ -24,6 +24,9 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
 
-# WHY 2 workers: single worker can't use multiple CPUs. 2 workers handle
-# concurrent requests better without overwhelming a small server.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# WHY start.sh as the command: it runs `alembic upgrade head` (in production) before
+# starting uvicorn, so the schema is current before the app serves a request. The exec
+# bit is forced here because a Windows git checkout may not carry Unix file modes into
+# the image — `./start.sh` would fail to exec otherwise.
+RUN chmod +x start.sh
+CMD ["./start.sh"]

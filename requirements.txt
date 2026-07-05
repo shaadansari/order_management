@@ -5,6 +5,12 @@ uvicorn[standard]==0.29.0
 # --- DB / ORM ---
 sqlalchemy==2.0.30
 
+# --- DB migrations ---
+alembic==1.13.1
+
+# --- PostgreSQL adapter ---
+psycopg2-binary==2.9.9
+
 # --- Validation / settings ---
 pydantic==2.7.1
 pydantic-settings==2.2.1
@@ -19,7 +25,6 @@ python-multipart==0.0.9
 
 # --- Caching ---
 redis==5.0.1
-
 
 # --- Rate limiting ---
 slowapi==0.1.9

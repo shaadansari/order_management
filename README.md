@@ -40,6 +40,37 @@ Tests use an isolated in-memory SQLite database per test, so they don't touch yo
 
 ---
 
+## Database migrations
+
+| Environment | Database   | Schema setup |
+|-------------|------------|--------------|
+| Development | SQLite     | Auto via `create_all` on startup |
+| Testing     | SQLite     | Auto via `create_all` per test run (in-memory DB) |
+| Production  | PostgreSQL | `alembic upgrade head`, run by `start.sh` before the server boots |
+
+Common commands:
+
+```bash
+alembic upgrade head                       # apply all pending migrations
+alembic current                            # show the active migration version
+alembic history                            # full migration history
+alembic revision --autogenerate -m "..."   # create a migration after changing models
+alembic downgrade -1                       # roll back one migration
+```
+
+Switching to PostgreSQL:
+
+1. Set `DATABASE_URL=postgresql://user:password@host:5432/dbname` in the environment.
+2. Run `alembic upgrade head` (or set `APP_ENV=production` and let `start.sh` run it on boot).
+3. No code changes — the engine branches on the URL scheme (see `app/database.py`).
+
+> After changing a model, run `alembic revision --autogenerate -m "..."`, **review the
+> generated file** (autogenerate isn't always right — e.g. it can't detect renames), then
+> `alembic upgrade head`. On SQLite, column changes go through Alembic batch mode
+> (`render_as_batch` in `migrations/env.py`) because SQLite can't `ALTER` most things in place.
+
+---
+
 ## API summary (all under `/v1`)
 
 | Method | Path | Who | Purpose |
@@ -104,7 +135,7 @@ Every error returns the same shape:
 ## Production checklist (documented, not wired)
 
 - **DB:** swap `DATABASE_URL` to PostgreSQL — code unchanged.
-- **Migrations:** adopt Alembic (replace `create_all`).
+- **Migrations:** ✅ wired — Alembic (`migrations/`) runs on boot in production via `start.sh`; see [Database migrations](#database-migrations) above.
 - **Caching:** Redis in front of `GET /v1/products` (TTL ~5 min), invalidate on write.
 - **Rate limiting:** throttle `/v1/auth/login` (e.g. 5/min) against brute force.
 - **Background jobs:** replace `BackgroundTasks` with Celery + Redis/broker for retries
