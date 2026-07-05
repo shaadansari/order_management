@@ -4,6 +4,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -38,6 +39,19 @@ api_prefix = f"/{settings.api_version}"  # /v1 — versioning from day one
 # import (main imports the routers). The middleware reads the limiter off app.state.
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)
+
+# WHY permissive CORS: browser frontends on any origin must be able to call this API.
+# Registered after SlowAPIMiddleware so it is the outermost layer (last added = outermost in
+# Starlette) and handles OPTIONS preflight before rate limiting/routing. allow_credentials is
+# left False (the default): the API authenticates via a Bearer token in the Authorization
+# header, NOT cookies, so no credentialed cross-origin requests are needed — and the CORS
+# spec forbids combining allow_origins=["*"] with allow_credentials=True (browsers reject it).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # --------------------------------------------------------------------------- #

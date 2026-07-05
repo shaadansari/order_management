@@ -4,8 +4,28 @@ A FastAPI backend for a simple e-commerce order management system. Two user type
 **customers** (register, browse, order, pay, cancel) and **admins** (manage products,
 view all orders).
 
-See [`order-management-design.md`](./order-management-design.md) for the full design
-rationale. This README covers running it.
+See [Features](#features) for what's included; the sections below cover running it.
+
+---
+
+## Features
+
+- **Role-based routing** — Each resource exposes separate customer/admin routers guarded by `require_customer` / `require_admin`, so a customer can never reach an admin endpoint (or vice-versa).
+- **API versioning** — Every route is mounted under `/v1` (driven by `API_VERSION`), so breaking changes can ship under a new prefix without disturbing existing clients.
+- **Stateless JWT auth (serverless-friendly)** — Bearer-token authentication with no server-side session store, so it scales horizontally across workers/instances with zero shared state.
+- **Type-safe API** — Pydantic v2 schemas validate every request and response, and money uses `Numeric(10,2)` to avoid float drift — bad input is rejected before it reaches business logic.
+- **Single error contract** — Every failure returns `{"error", "message", "status"}` (422s, 404s, and 429s included), so clients parse one predictable shape.
+- **Race-condition-safe stock** — Payment decrements stock with a conditional `UPDATE ... WHERE stock >= qty` checked via `rowcount`, so two customers can't oversell the last item (works on SQLite *and* Postgres).
+- **Duplicate-operation guards** — The order state machine rejects invalid transitions (`ORDER_ALREADY_PAID`, `ORDER_NOT_PAYABLE`, `ORDER_NOT_CANCELLABLE`), so a request can't double-charge or double-cancel.
+- **Redis caching (graceful degradation)** — Product lists are cached in Redis (5-min TTL, invalidated on writes); if Redis is down the app silently serves from the DB and never fails a request.
+- **Celery background tasks** — Invoice generation, order notifications, and low-stock alerts run in Celery workers (Redis broker) with automatic retries, so slow/external work never blocks the API response.
+- **Rate limiting** — slowapi throttles `/auth/login` (5/min) and `/auth/register` (3/min) per IP to blunt brute-force and signup spam.
+- **CORS enabled** — Permissive cross-origin access so any browser frontend can call the API.
+- **Database migrations + PostgreSQL** — Alembic versioned migrations; switch from SQLite (dev) to PostgreSQL (prod) by changing one environment variable.
+- **CI/CD pipeline** — GitHub Actions runs `ruff` lint → tests with a coverage gate → Docker build smoke test → Render deploy on push to `main`.
+- **Dockerized** — Multi-stage `Dockerfile` (non-root user, health check) plus `docker-compose` for the full local stack (API + Redis + Celery worker + Flower).
+- **Linting with Ruff** — `ruff check` enforces a consistent style and is a hard CI gate.
+- **Test coverage** — A pytest suite (isolated in-memory SQLite per test, with fakes for Redis and Celery) keeps tests hermetic; coverage is enforced in CI.
 
 ---
 
@@ -29,6 +49,19 @@ uvicorn app.main:app --reload
 # 5. Open the interactive docs
 #    http://127.0.0.1:8000/docs
 ```
+
+### Using Docker
+
+```bash
+# Full local stack — API (:8000) + Redis + Celery worker + Flower dashboard (:5555)
+docker compose up
+
+# …or run just the API in a single container
+docker build -t oms .
+docker run -p 8000:8000 oms
+```
+
+Then open http://127.0.0.1:8000/docs (Flower dashboard at http://localhost:5555 when using `docker compose up`).
 
 ## Run the tests
 
@@ -96,34 +129,6 @@ to exercise the 402 path.
 
 ---
 
-## Key design decisions (and where they differ from the doc)
-
-These were reviewed against the design doc and adjusted for correctness. Each is also
-documented inline in the code.
-
-1. **Stock is reduced only on successful payment, not at order creation.** An order is
-   just a CREATED intent with a price snapshot; it reserves nothing. The decrement happens
-   in `pay_order` via an atomic conditional
-   `UPDATE product SET stock = stock - :qty WHERE id = :id AND stock >= :qty` checked via
-   `rowcount` — race-free inventory management on both SQLite and PostgreSQL. If any item
-   can't be fulfilled, the whole payment rolls back (no stock lost, no charge).
-2. **Atomic conditional `UPDATE` instead of `SELECT ... FOR UPDATE`.** SQLite ignores
-   `FOR UPDATE` (no row locks), so it gives false safety in dev. The pattern above (checked
-   via `rowcount`) is race-free on **both** SQLite and PostgreSQL.
-3. **`Numeric(10,2)` for money instead of `REAL`** (float) — avoids float drift like
-   `0.1 + 0.2 != 0.3`. Maps to `DECIMAL` on Postgres unchanged.
-4. **Cancel does not restore stock.** Because stock is only ever reduced on successful
-   payment, a CREATED order holds no inventory — there is nothing to give back. Cancelling
-   just flips the status to CANCELLED (the order + items are kept for history).
-5. **`create_all` for dev, Alembic for prod.** Tables auto-create on startup for zero
-   setup. Switch to Alembic migrations for production (schema is identical).
-
-Everything else (bcrypt, JWT, `/v1` versioning, soft delete, price snapshot, server-side
-totals, consistent error shape, 401-vs-403 semantics, services layer) is implemented as
-designed.
-
----
-
 ## Error format
 
 Every error returns the same shape:
@@ -132,24 +137,7 @@ Every error returns the same shape:
 { "error": "INSUFFICIENT_STOCK", "message": "Insufficient stock for product 'Laptop'", "status": 400 }
 ```
 
-## Production checklist (documented, not wired)
-
-- **DB:** swap `DATABASE_URL` to PostgreSQL — code unchanged.
-- **Migrations:** ✅ wired — Alembic (`migrations/`) runs on boot in production via `start.sh`; see [Database migrations](#database-migrations) above.
-- **Caching:** Redis in front of `GET /v1/products` (TTL ~5 min), invalidate on write.
-- **Rate limiting:** throttle `/v1/auth/login` (e.g. 5/min) against brute force.
-- **Background jobs:** replace `BackgroundTasks` with Celery + Redis/broker for retries
-  and durability; add an idempotency key on `POST /orders/{id}/pay` to dedupe payments.
-- **Real payment gateway:** use two-phase **authorize → reserve stock → capture**. The
-  simulated single-call flow holds the product row lock across the charge; with a real
-  (slow) gateway that risks lock contention and a charge that succeeds but fails to commit.
-  Two-phase authorizes funds first (reversible), reserves stock, then captures — so a
-  failure after authorization can be voided without losing funds.
-- **Abandoned orders:** scheduled job to flag/remove stale `CREATED` orders after 15 days.
-- **Observability:** Sentry (errors) + Prometheus (metrics); structured logging.
-- **CI/CD:** GitHub Actions; the included `Dockerfile` containerizes the app.
-
-
+## Project structure
 
 models/      → what DB stores
 schemas/     → what API shows
